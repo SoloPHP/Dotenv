@@ -108,12 +108,19 @@ final class DotenvTest extends TestCase
         $path = $this->tmpDir . '/.env';
         file_put_contents($path, 'PORT=8000');
         chmod($path, 0);
-        if (is_readable($path)) {
-            self::markTestSkipped('The current user can read files without permission bits.');
-        }
 
-        $this->expectException(RuntimeException::class);
-        Dotenv::read($this->tmpDir);
+        try {
+            // Windows only marks the file read-only, and root reads it anyway.
+            if (is_readable($path)) {
+                self::markTestSkipped('The current user can read files without permission bits.');
+            }
+
+            $this->expectException(RuntimeException::class);
+            Dotenv::read($this->tmpDir);
+        } finally {
+            // A read-only file cannot be deleted on Windows, so restore the bits for tearDown().
+            chmod($path, 0644);
+        }
     }
 
     public function testANullByteInTheFilenameIsNotSilentlyTreatedAsAMissingFile(): void
