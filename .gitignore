@@ -3,9 +3,15 @@
 /phpunit.xml
 .phpunit.result.cache
 /.phpunit.cache/
+/.phpstan.cache/
 /.php-cs-fixer.cache
 composer.lock
 .idea
 .DS_Store
 Thumbs.db
 .vscode/
+
+# Documentation
+/docs/node_modules/
+/docs/.vitepress/cache/
+/docs/.vitepress/dist/

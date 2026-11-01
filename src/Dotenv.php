@@ -4,71 +4,105 @@ declare(strict_types=1);
 
 namespace Solo\Dotenv;
 
+use InvalidArgumentException;
+use RuntimeException;
+
 final class Dotenv
 {
+    private const array DEFAULT_FILES = ['.env', '.env.local'];
+
     /**
-     * Load .env files into $_ENV only (no putenv), optionally preserving existing keys.
-     * @param string $baseDir Directory containing .env files
-     * @param array<int,string> $filenames Files to load in order (first wins unless $overwrite=true)
+     * Read optional files in order. Later assignments win.
+     *
+     * @param list<string> $filenames
+     * @return array<string, string>
+     */
+    public static function read(string $baseDir, array $filenames = self::DEFAULT_FILES): array
+    {
+        $prefix = rtrim($baseDir, '/') . '/';
+        // Looking up "." inside a directory also checks permission to traverse it.
+        if ($baseDir === '' || !is_dir($prefix . '.')) {
+            throw new RuntimeException("Cannot access dotenv directory: $baseDir");
+        }
+
+        $values = [];
+        foreach ($filenames as $filename) {
+            if ($filename === '' || str_contains($filename, "\0")) {
+                throw new InvalidArgumentException('Expected a non-empty dotenv filename without null bytes.');
+            }
+
+            $path = $prefix . $filename;
+            if (!file_exists($path) && !is_link($path) && is_dir(dirname($path) . '/.')) {
+                continue;
+            }
+
+            $contents = is_file($path) ? @file_get_contents($path) : false;
+            if ($contents === false) {
+                throw new RuntimeException("Cannot read dotenv file: $path");
+            }
+
+            $values = array_replace($values, EnvParser::parse($contents, $path));
+        }
+
+        return $values;
+    }
+
+    /**
+     * Apply the merged files after every file has been read successfully.
+     *
+     * @param list<string> $filenames
      */
     public static function load(
         string $baseDir,
-        array $filenames = ['.env', '.env.local'],
+        array $filenames = self::DEFAULT_FILES,
         bool $overwrite = false,
         bool $populateServer = false
-    ): void
-    {
-        $setInThisCall = [];
-        foreach ($filenames as $filename) {
-            $path = rtrim($baseDir, '/').'/'.$filename;
-            if (!is_file($path) || !is_readable($path)) {
+    ): void {
+        foreach (self::read($baseDir, $filenames) as $key => $value) {
+            $header = self::isRequestHeader($key);
+            if (!$overwrite && (array_key_exists($key, $_ENV) || (!$header && array_key_exists($key, $_SERVER)))) {
                 continue;
             }
-            $vars = EnvParser::parse(file_get_contents($path) ?: '');
-            foreach ($vars as $key => $value) {
-                $alreadyExists = array_key_exists($key, $_ENV);
-                $wasSetDuringThisCall = array_key_exists($key, $setInThisCall);
-                if (!$overwrite && $alreadyExists && !$wasSetDuringThisCall) {
-                    continue;
-                }
-                $_ENV[$key] = $value;
-                $setInThisCall[$key] = true;
-                if ($populateServer) {
-                    $_SERVER[$key] = $value;
-                }
+
+            $_ENV[$key] = $value;
+            if ($populateServer && !$header) {
+                $_SERVER[$key] = $value;
             }
         }
     }
 
     public static function get(string $key, mixed $default = null): mixed
     {
-        $value = $_ENV[$key] ?? $_SERVER[$key] ?? null;
+        $value = $_ENV[$key] ?? (self::isRequestHeader($key) ? null : $_SERVER[$key] ?? null);
         return $value === null || $value === '' ? $default : $value;
     }
 
     public static function string(string $key, string $default = ''): string
     {
         $value = self::get($key);
-        return $value === null ? $default : (string)$value;
+        return is_scalar($value) ? (string) $value : $default;
     }
 
     public static function int(string $key, int $default = 0): int
     {
         $value = self::get($key);
-        if ($value === null || $value === '') {
+        if (is_int($value)) {
+            return $value;
+        }
+
+        if (!is_string($value) || preg_match('/\A([+-]?)0*([0-9]+)\z/', trim($value, " \t\r\n"), $parts) !== 1) {
             return $default;
         }
-        return is_numeric($value) ? (int)$value : $default;
+
+        // Leading zeros are stripped above; FILTER_VALIDATE_INT rejects values outside the platform range.
+        $integer = filter_var($parts[1] . $parts[2], FILTER_VALIDATE_INT);
+        return $integer === false ? $default : $integer;
     }
 
     public static function bool(string $key, bool $default = false): bool
     {
         $value = self::get($key);
-        if ($value === null) {
-            return $default;
-        }
-        $normalized = is_string($value) ? strtolower(trim($value)) : $value;
-        return match ($normalized) {
+        return match (is_string($value) ? strtolower(trim($value)) : $value) {
             true, 1, '1', 'true', 'yes', 'on' => true,
             false, 0, '0', 'false', 'no', 'off' => false,
             default => $default,
@@ -77,23 +111,17 @@ final class Dotenv
 
     public static function required(string $key): string
     {
-        $value = self::get($key);
-        if ($value === null || $value === '') {
-            throw new \InvalidArgumentException("Missing required env: $key");
+        $value = self::string($key);
+        if ($value === '') {
+            throw new InvalidArgumentException("Expected a non-empty scalar value for environment variable: $key");
         }
-        return (string)$value;
+
+        return $value;
     }
 
-    /**
-     * Very small .env parser: supports lines like KEY=VALUE, quotes, and leading 'export '.
-     * Lines starting with # are comments; empty lines ignored.
-     * No variable expansion is performed.
-     * @return array<string,string>
-     */
-    private static function parse(string $contents): array
+    /** Web SAPIs copy client request headers into $_SERVER as HTTP_* entries, so those are not environment. */
+    private static function isRequestHeader(string $key): bool
     {
-        return EnvParser::parse($contents);
+        return str_starts_with($key, 'HTTP_');
     }
 }
-
-
